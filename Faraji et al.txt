@@ -1,0 +1,879 @@
+var imageCollection2 = ee.ImageCollection("MODIS/061/MOD11A1"),
+    geometry = 
+    /* color: #98ff00 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[49.854525087002784, 36.36000093775225],
+          [49.854525087002784, 36.161789306460605],
+          [50.148409364346534, 36.161789306460605],
+          [50.148409364346534, 36.36000093775225]]], null, false),
+    border = 
+    /* color: #0b4a8b */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[50.20311209519592, 36.12112516987239],
+          [50.2185616191217, 36.13914933647669],
+          [50.201590172389054, 36.148178463714174],
+          [50.18545400295546, 36.15843534432943],
+          [50.17172109279921, 36.169799509855494],
+          [50.163824669459366, 36.17035381724916],
+          [50.150091759303116, 36.1487329239913],
+          [50.152151695826554, 36.14124737954125],
+          [50.156614891627335, 36.134038402377705],
+          [50.17240773830702, 36.13071095876287],
+          [50.17721425686171, 36.13708843508678]]]),
+    geometry2 = 
+    /* color: #d1d1d1 */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[49.894007203702, 36.340640085206665],
+          [49.894007203702, 36.179522191252815],
+          [50.100687501553566, 36.179522191252815],
+          [50.100687501553566, 36.340640085206665]]], null, false),
+    table = ee.FeatureCollection("projects/ee-zfzohreh/assets/20220719");
+var geometry2=geometry2
+Map.centerObject(border,15)
+var time_start = '2022-01-01', time_end = '2022-12-30'
+/////////////////////////////////////////////////////sentinel1/////////////////////////////////////////////////////////////////////////////////////////
+// Import Sentinel-1 collection
+var sentinel1 =  ee.ImageCollection('COPERNICUS/S1_GRD');
+// Filter Sentinel-1 collection for study area, date ranges and polarization components
+var sCollection =  sentinel1
+                    //filter by aoi and time
+                    .filterBounds(geometry2)
+                     .filterDate(time_start , time_end)
+                    // Filter to get images with VV and VH dual polarization
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+                    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+                    // Filter to get images collected in interferometric wide swath mode.
+                    .filter(ee.Filter.eq('instrumentMode', 'IW')).map(function(image) {
+          var edge = image.lt(-30.0);
+          var maskedImage = image.mask().and(edge.not());
+          return image.updateMask(maskedImage);
+        });;
+
+      //  Map.addLayer(imgVV)
+/////////////////////////////LANDSAT LST
+var landsat = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+.filterDate(time_start,time_end)
+.filterBounds(geometry)
+.filter(ee.Filter.eq('WRS_PATH',165))
+.filter(ee.Filter.eq('WRS_ROW',35))
+.filter(ee.Filter.lt('CLOUD_COVER',10))
+.map(function(img){
+  var band=img.select('ST_B10').multiply(0.00341802).add(149).rename('landsat')
+  var ref=img.select('SR_B4','SR_B5').multiply(2.75e-05).add(-0.2)
+  var ndvi=ref.normalizedDifference(['SR_B5','SR_B4']).rename('ndvi')
+  return  band.addBands(ndvi).clip(geometry)
+  .copyProperties(img,['system:time_start','system:time_end'])
+})
+ print(landsat,'landsat')
+ // Map.addLayer(landsat.first().clip(geometry2))
+////////////////////////////lst
+var temp1 = imageCollection2
+.filterDate(time_start, time_end).filterBounds(geometry).map(function(img){
+ var band=img.select('LST_Day_1km').multiply(0.02).reproject('EPSG:4326', null, 1000);
+  return  band.rename('LST')
+  .copyProperties(img,['system:time_start','system:time_end'] )
+  });
+  
+  ////////////////////////////////////////////////////////////modis&landsat same time rmse
+  var temp_win=5;
+var temp_diff=temp_win*1000*3600*24;
+var join=ee.Join.saveAll({
+  matchesKey:'j',
+  ordering:'system:time_start',
+  measureKey:'temp_diff'
+})
+var before=ee.Filter.greaterThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var after=ee.Filter.lessThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var max_diff=ee.Filter.maxDifference({
+  difference:temp_diff, rightField:'system:time_start', leftField:'system:time_start'
+})
+var before_filter=ee.Filter.and(max_diff,before);
+var after_filter=ee.Filter.and(max_diff,after);
+var filter=ee.Filter.or(before_filter,after_filter)
+var join_data=ee.ImageCollection(join.apply(landsat,temp1,filter));
+
+var LANDSAT_LST=join_data.map(function(img){
+  var mod_max=ee.ImageCollection.fromImages(img.get('j')).select('LST').max();
+  var landsat=img.select('landsat').clip(geometry2);
+  return mod_max.addBands(landsat).toInt().clip(geometry2)
+  .copyProperties(img,img.propertyNames())
+});
+////////////////////////////////////////////////////////////rmse of modis & landsat
+  // Compute area in sq. km directly from the geometry.
+  var Diff = function(img) {
+  var modis = img.select('LST')
+  var landsat=img.select('landsat').clip(geometry2)
+  // Compute the difference between computed LST and the LST property.
+  var rmse = ((modis.subtract(landsat)).pow(2)).rename('rmse');
+  var mae =((modis.subtract(landsat)).abs()).rename('mae')
+  var mbe=((modis.subtract(landsat))).rename('mbe')
+  // Return the feature with the squared difference set to the 'diff' property.
+  return rmse.addBands(mae).addBands(mbe).copyProperties(img,['system:time_start','system:time_end']);
+};
+// Calculate RMSE 
+var rmse_LANDSAT_MODIS = LANDSAT_LST.map(Diff);
+
+// add the map
+//Map.addLayer(rmse_LANDSAT_MODIS.toBands(),[],'rmse',false);
+//////////////////
+/////////////////////////////////////////////////
+var res_L_M = rmse_LANDSAT_MODIS.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  })
+  return image.set('mean', reduced);
+});
+var vals_L_M = res_L_M.aggregate_array('mean');
+print(vals_L_M, 'rmse_LANDSAT_MODIS');
+////////////////////////////////////////////////calibration
+var calibration_l=LANDSAT_LST.map(function(img){
+ var modis=img.select('LST');
+ var landsat=img.select('landsat');
+ var cons=ee.Image(1)
+return modis.addBands(cons).addBands(landsat)
+  .select([0,1,2],['modis','cons','landsat']).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+  });
+//////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+var model_l=calibration_l.reduce(ee.Reducer.robustLinearRegression(2,1)).select('coefficients');
+var slope_l=model_l.arrayGet([0,0]);
+var intercept_l=model_l.arrayGet([1,0]);
+//////////////
+var validation_l=calibration_l.map(function(img){
+ var eq1=img.select('modis').multiply(slope_l).add(intercept_l).rename('LST').clip(geometry2)
+ var landsat1=img.select('landsat')
+  return  eq1.addBands(landsat1).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+})
+///////////////////////////result of calibration
+ var Diff = function(img) {
+  var modis2 = img.select('LST')
+  var landsat2=img.select('landsat').clip(geometry2)
+  // Compute the difference between computed LST and the LST property.
+  var rmse_l= ((modis2.subtract(landsat2)).pow(2)).rename('rmse_l');
+  var mae_l =((modis2.subtract(landsat2)).abs()).rename('mae_l')
+  var mbe_l=((modis2.subtract(landsat2))).rename('mbe_l')
+  // Return the feature with the squared difference set to the 'diff' property.
+  return rmse_l.addBands(mae_l).addBands(mbe_l).copyProperties(img,['system:time_start','system:time_end']);
+};
+// Calculate RMSE 
+var rmse_MODIS_c = validation_l.map(Diff);
+
+// add the map
+//Map.addLayer(rmse_MODIS_c.toBands(),[],'rmse_modis_calibrated',false);
+//////////////////
+/////////////////////////////////////////////////
+var res_modis_c = rmse_MODIS_c.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  })
+  return image.set('mean', reduced);
+});
+var vals_modis_c = res_modis_c.aggregate_array('mean');
+print(vals_modis_c, 'rmse_MODIS_c');
+
+//////////////////////////////////////////////////
+var temp = imageCollection2
+.filterDate(time_start, time_end).filterBounds(geometry).map(function(img){
+ var band=img.select('LST_Day_1km').multiply(0.02).multiply(slope_l).add(intercept_l).reproject('EPSG:4326', null, 1000);
+  return  band.rename('LST')
+  .copyProperties(img,['system:time_start','system:time_end'] )
+  });
+  
+////////////////////////////////////SENTINEL
+// Import the necessary Sentinel-2 image collection
+//  load s2 dataset
+
+var s2_collection1 = ee.ImageCollection('COPERNICUS/S2_SR')
+                    .filterBounds(geometry)
+                    .filterDate(time_start , time_end)
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE' , 10));
+
+ //print('s2_collection' , s2_collection)
+
+
+//  function to mask cloud
+
+function mask_cloud(image){
+  var qa = image.select('QA60')
+  
+  var cloudBitMask = 1 << 10;
+  
+  var cirrusBitMask = 1 << 11;
+  
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+  .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  
+  return image.updateMask(mask).divide(10000)
+  .select('B.*').copyProperties(image , ['system:time_start' , 'system:id'])
+}
+
+var s2_clousless1 = s2_collection1.map(mask_cloud)
+ //print('s2_clousless', s2_clousless)
+/////////////////////////////
+var WATER_MASK2 = s2_clousless1.map(function(image){
+  var WATER_MASK1 = image.select('B8').gte(0.08)
+  return image.select('B.*').updateMask(WATER_MASK1)
+})
+//print('WATER_MASK',WATER_MASK)
+//Map.addLayer(WATER_MASK)
+//  create mosaic by date
+
+function mosaicByDate(imcoll){
+  var imlist = imcoll.toList(imcoll.size())
+  var uniqueDate = imlist.map(function(im){
+    return ee.Image(im).date().format('YYYY-MM-dd')
+  }).distinct()
+  
+  var mosaic_imlist = uniqueDate.map(function(d){
+    d = ee.Date(d);
+    
+    var im = imcoll.filterDate(d , d.advance(1 , 'day'))
+    .mosaic()
+    return im.set(
+      'system:time_start' , d.millis(),
+      'system:id' , ee.String(d.format('YYYY-MM-dd'))
+      .cat('sentinel-2')
+      )
+  })
+  
+  return ee.ImageCollection((mosaic_imlist))
+}
+
+var s2_mosaic1 = mosaicByDate(WATER_MASK2)
+
+print('s2_mosaic', s2_mosaic1)
+
+// Define the region of interest (ROI)
+var region=geometry
+Map.centerObject(region)
+// Filter the image collection based on date and ROI
+var filteredCollection = s2_mosaic1.filterBounds(region) 
+  .filterDate(time_start, time_end)
+  .select('B2','B3','B4', 'B8','B11','B8A')
+  .sort('system:time_start');
+ ////////
+ // Apply the calculateNDVI function to the image collection
+// Define a function to calculate NDVI
+var ndviCollection = filteredCollection.map(function(image) {
+  var ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI').multiply(10)
+  var bands=image .select('B2','B3','B4', 'B8','B11','B8A').multiply(10)
+  return ndvi.addBands(bands).copyProperties(image,['system:time_start','system:time_end']);
+});
+//////////////////////////
+var landcover=ee.ImageCollection("GOOGLE/DYNAMICWORLD/V1")
+ .select('label').filterBounds(geometry)
+                    .filterDate(time_start , time_end).map(function(img){
+ var band=(img).multiply(10)
+  return  band
+  .copyProperties(img,['system:time_start','system:time_end'] )
+  });
+               
+   var landcover_mosaic = mosaicByDate(landcover)
+   var CLASS_NAMES = [
+    'water', 'trees', 'grass', 'flooded_vegetation', 'crops',
+    'shrub_and_scrub', 'built', 'bare', 'snow_and_ice'];
+
+var VIS_PALETTE = [
+    '419bdf', '397d49', 'e49635', '7a87c6', '88b053', 'dfc35a', 'c4281b',
+    'a59b8f', 'b39fe1'];
+  // Map.addLayer(landcover.mean().select('label').clip(geometry2),{min: 0, max: 8, palette: VIS_PALETTE},'clissifiedu_sentinel');
+   //////////////////////////////////////////////////////LEGEND
+   var legend = ui.Panel({style: {position: 'middle-right', padding: '8px 15px'}});
+
+var makeRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {color: '10a4e8',
+      backgroundColor: color,
+      padding: '10px',
+      margin: '0 0 4px 0',
+    }
+  });
+  var description = ui.Label({
+    value: name,
+    style: {
+      margin: '0px 0 4px 6px',
+    }
+  }); 
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')}
+)};
+
+var title = ui.Label({
+  value: 'Legend',
+  style: {fontWeight: 'bold',
+    fontSize: '16px',
+    margin: '0px 0 4px 0px'}});
+    
+legend.add(title);
+legend.add(makeRow('#88b053' , 'Crops'))
+legend.add(makeRow('#c4281b' , 'built'))
+legend.add(makeRow('#a59b8f' , 'bare'))
+legend.add(makeRow('#dfc35a' , 'shrub_and_scrub'))
+
+Map.add(legend);
+    print(landcover_mosaic,'land')
+       // Apply the calculate EVI function to the image collection
+var EVI_laiCollection =filteredCollection.map( function(image) {
+ var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+     'NIR': image.select('B8'),
+     'RED': image.select('B4'),
+     'BLUE': image.select('B2')
+}).multiply(10).rename('evi') 
+var lai=evi.multiply(3.618).subtract( 0.118).multiply(10).rename('lai') ;
+ return evi.addBands(lai).copyProperties(image,['system:time_start','system:time_end']);});
+   // Apply the calculate NDWI function to the image collection
+
+ var NDWICollection = filteredCollection.map(function(image) {
+ var NDWI = image.expression(
+ ' (B3 - B8) / (B3 + B8)',{
+   'B3': image.select('B3'),
+   'B8':image.select('B8')
+ }).multiply(10).rename('ndwi')
+ return NDWI.copyProperties(image,['system:time_start','system:time_end']);});
+
+////////////////////////////////DEM
+// NASADEM Data
+var ndem = ee.Image("USGS/SRTMGL1_003");
+ndem = ndem.select('elevation')
+           .clip(geometry2)
+           .reproject('EPSG:4326', null, 10)
+           .resample('bicubic');
+
+//Map.addLayer(ndem,{bands: ["elevation"],gamma: 1, max: 1493.3, min: 1247.7, opacity: 1},"SRTM",false);
+
+////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////
+        var temporal_collection = function(collection, start, count, interval, unit){
+  var seq = ee.List.sequence(0, ee.Number(count).subtract(1));
+  var origin_date = ee.Date(start);
+  return ee.ImageCollection(seq.map(function(i){
+    var start_date = origin_date.advance(ee.Number(interval).multiply(i), unit);
+    var end_date = origin_date.advance(ee.Number(interval).multiply(ee.Number(i).add(1)), unit);
+    return collection.filterDate(start_date, end_date).mean()
+    .set('system:time_start', start_date.millis())
+    .set('system:time_end', end_date.millis())    
+    }))  
+  };
+var temp10days = temporal_collection(temp, time_start,36,10, 'days')
+.map(function(img){ return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+var ndvi10days = temporal_collection(ndviCollection, time_start,36,10, 'days')
+.map(function(img){
+  return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+var EVI10days = temporal_collection(EVI_laiCollection, time_start,36,10, 'days')
+.map(function(img){
+  return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+var NDWI10days = temporal_collection(NDWICollection, time_start, 36,10,  'days')
+.map(function(img){return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+var land10days = temporal_collection(landcover_mosaic, time_start, 36,10,  'days')
+.map(function(img){
+  return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+  
+  var SE1_10days = temporal_collection(sCollection, time_start, 36,10,  'days')
+.map(function(img){
+  return img.toInt().copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])})
+  
+var data_col = temp10days.combine(ndvi10days).combine(EVI10days).combine(land10days).combine(NDWI10days).combine(SE1_10days)
+print(data_col)
+///////////////////////////add dem
+var add_dem=ndem.addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem)
+.addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem)
+.addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem).addBands(ndem)
+
+///////////////////////remove one image that have not NDVI band
+ var data_remove= data_col.filter(ee.Filter.neq('system:index', '1'))
+ var data_remove= data_remove.filter(ee.Filter.neq('system:index', '11'))
+  var data_remove= data_remove.filter(ee.Filter.neq('system:index', '12'))
+   var data_remove= data_remove.filter(ee.Filter.neq('system:index', '3'))
+ var data_remove= data_remove.filter(ee.Filter.neq('system:index', '33'))
+  var data_remove= data_remove.filter(ee.Filter.neq('system:index', '34'))
+  var data_remove= data_remove.filter(ee.Filter.neq('system:index', '4'))
+  var data_remove= data_remove.filter(ee.Filter.neq('system:index', '6'))
+    var data_remove= data_remove.filter(ee.Filter.neq('system:index', '7'))
+      var data_remove= data_remove.filter(ee.Filter.neq('system:index', '9'))
+//print(data_remove)
+var data_remove=data_remove.map(function(img){
+  var ra1=img.select('VV');
+  var ra2=img.select('VH');
+  var ra=ra1.divide(ra2).rename('vv/vh');
+  return img.addBands(ra).addBands(add_dem).clip(geometry2)
+})
+print(data_remove)
+//Map.addLayer(data_remove.toBands())
+//////////////////////
+////////////////////////////
+var TEMP10 = data_remove.map(function(img){
+  var dep = img.select('LST');
+  var indep = img.select('NDVI','evi','lai','B4','ndwi','B8','B11','B8A','VV','VH','vv/vh','elevation','label');
+  var indep_name = indep.bandNames();
+  var cons=ee.Image(1);
+  var training = img.stratifiedSample({
+    numPoints: 100, classBand: 'LST', region: geometry, scale: 1000
+    });
+    
+  var model = ee.Classifier.smileRandomForest(80).train({
+    features: training, classProperty: 'LST', inputProperties: indep_name
+    }).setOutputMode('REGRESSION');
+
+  var result = indep.classify(model).toFloat().rename('TEMP10')
+  
+  return result.addBands(cons).addBands(dep).clip(geometry2)
+  .select([0,1,2],['sentinel','cons','modis']).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+  })
+//Map.addLayer(TEMP10.toBands(), [], 'TEMP10')
+
+Map.addLayer(TEMP10.select('sentinel').first(),{min: 270, max: 280, palette: ['red','orange','yellow','green','blue']},'TEMP10')
+
+//////////////////
+
+/////////////////////////////find landsat same time to modis30
+var temp_win=5;
+var temp_diff=temp_win*1000*3600*24;
+var join=ee.Join.saveAll({
+  matchesKey:'j',
+  ordering:'system:time_start',
+  measureKey:'temp_diff'
+})
+var before=ee.Filter.greaterThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var after=ee.Filter.lessThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var max_diff=ee.Filter.maxDifference({
+  difference:temp_diff, rightField:'system:time_start', leftField:'system:time_start'
+})
+var before_filter=ee.Filter.and(max_diff,before);
+var after_filter=ee.Filter.and(max_diff,after);
+var filter=ee.Filter.or(before_filter,after_filter)
+var join_data=ee.ImageCollection(join.apply(landsat,TEMP10,filter));
+
+var data_coll=join_data.map(function(img){
+  var mod_max=ee.ImageCollection.fromImages(img.get('j')).select('sentinel').max();
+  var landsat=img.select('landsat').clip(geometry2);
+  return mod_max.addBands(landsat).toInt().clip(geometry2)
+  .copyProperties(img,img.propertyNames())
+});
+print(data_coll)
+//Map.addLayer(data_coll.select('sentinel'),{min: 282.2, max: 307.8, palette: ['red','orange','yellow','green','blue']},'SENTINEL')
+//Map.addLayer(data_coll.select('landsat'),{min: 313.3, max: 331, palette: ['red','orange','yellow','green','blue']},'LANDSAT')
+//////////////////////////////////////////////////////RMSE
+////////////////////
+var Diff = function(img) {
+  // Compute area in sq. km directly from the geometry.
+  var modis10 = img.select('sentinel')
+  var landsat=img.select('landsat').clip(geometry2)
+  // Compute the difference between computed LST and the LST property.
+  var rmse = ((modis10.subtract(landsat)).pow(2)).rename('rmse');
+  var mae =((modis10.subtract(landsat)).abs()).rename('mae')
+  var mbe=((modis10.subtract(landsat))).rename('mbe')
+  // Return the feature with the squared difference set to the 'diff' property.
+  return rmse.addBands(mae).addBands(mbe).copyProperties(img,['system:time_start','system:time_end']);
+};
+// Calculate RMSE 
+var rmse = data_coll.map(Diff);
+////////////////////////////////////////////////////
+//////////////////
+/////////////////////////////////////////////////
+var res = rmse.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  })
+  return image.set('mean', reduced);
+});
+var vals = res.aggregate_array('mean');
+print(vals, 'RMSE');
+/////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////////calibration
+ var sentinel1= data_coll.select('sentinel').filter(ee.Filter.neq('system:index', 'LC08_165035_20221119'));
+ var sentinel2= sentinel1.filter(ee.Filter.neq('system:index', 'LC08_165035_20221002'));
+  var sentinel3= sentinel2.filter(ee.Filter.neq('system:index', 'LC08_165035_20220916'));
+   var landsat1= data_coll.select('landsat').filter(ee.Filter.neq('system:index', 'LC08_165035_20221119'));
+ var landsat2= landsat1.filter(ee.Filter.neq('system:index', 'LC08_165035_20221002'));
+  var landsat3= landsat2.filter(ee.Filter.neq('system:index', 'LC08_165035_20220916'));
+var linear_coll=sentinel3.combine(landsat3);
+//print(linear_coll)
+var calibration=linear_coll.map(function(img){
+ var sentinel=img.select('sentinel');
+ var landsat=img.select('landsat');
+ var cons=ee.Image(1)
+return sentinel.addBands(cons).addBands(landsat)
+  .select([0,1,2],['sentinel','cons','landsat']).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+  });
+ // print(calibration);
+
+//////////////////
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var model=calibration.reduce(ee.Reducer.robustLinearRegression(2,1)).select('coefficients');
+var slope=model.arrayGet([0,0]);
+var intercept=model.arrayGet([1,0]);
+//print(slope)
+////////////////////////////////sentinel 3 images for validation
+ var sentinel1= data_coll.select('sentinel').filter(ee.Filter.eq('system:index', 'LC08_165035_20221119'))
+ var sentinel2= data_coll.select('sentinel').filter(ee.Filter.eq('system:index', 'LC08_165035_20221002'))
+  var sentinel3= data_coll.select('sentinel').filter(ee.Filter.eq('system:index', 'LC08_165035_20220916'))
+var validation_images=sentinel3.merge(sentinel2).merge(sentinel1)
+
+var landsat1= data_coll.select('landsat').filter(ee.Filter.eq('system:index', 'LC08_165035_20221119'))
+  var landsat2= data_coll.select('landsat').filter(ee.Filter.eq('system:index', 'LC08_165035_20221002'));
+   var landsat3= data_coll.select('landsat').filter(ee.Filter.eq('system:index', 'LC08_165035_20220916'));
+   var validation_landsat=landsat3.merge(landsat2).merge(landsat1)
+var validation_images=validation_images.combine(validation_landsat)
+var validation=validation_images.map(function(img){
+ var eq=img.select('sentinel').multiply(slope).add(intercept).rename('validate').clip(geometry2)
+ var validation_landsat=img.select('landsat')
+  return  eq.addBands(validation_landsat).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+})
+
+print(validation)
+////////////////////////////////////////RMSE_VALIDATION
+var Diff = function(img) {
+  // Compute area in sq. km directly from the geometry.
+  var sentinel_v = img.select('validate')
+  var landsat=img.select('landsat').clip(geometry2)
+  // Compute the difference between computed LST and the LST property.
+  var diff = ((sentinel_v.subtract(landsat)).pow(2))
+  var mae =((sentinel_v.subtract(landsat)).abs()).rename('mae')
+  var mbe=((sentinel_v.subtract(landsat))).rename('mbe');
+  // Return the feature with the squared difference set to the 'diff' property.
+  return diff.addBands(mae).addBands(mbe).copyProperties(img,['system:time_start','system:time_end']);
+};
+// Calculate RMSE 
+var rmse_v = validation.map(Diff)
+var rmse2=rmse_v.map(function(img){
+  var remove =img
+  return remove
+})
+// add the map
+//Map.addLayer(rmse2.toBands(),[],'rmse_v',false);
+//////////////////
+/////////////////////////////////////////////////
+var res2 = rmse2.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  });
+  return image.set('mean', reduced);
+});
+var vals2 = res2.aggregate_array('mean');
+print(vals2, 'RMSE_v');
+/////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////Time series
+var geometry = ee.Geometry.MultiPoint([49.9932, 36.2318
+])
+var POI = geometry2
+
+// Convert temperature to Celsius.
+  var modisLST = TEMP10.map(function(img){
+  var date = img.get('system:time_start');
+  return img.subtract(273.15).set('system_time_start', date);
+});
+// Create a function that takes an image, calculates the mean over a
+// geometry and returns the value and the corresponding date as a 
+// feature.
+var createTS = function(img){
+  var date = img.get('system_time_start');
+  var value = img.reduceRegion(ee.Reducer.mean(), POI).get('sentinel');
+  var ft = ee.Feature(null, {'system:time_start': date, 
+                             'date': ee.Date(date).format('Y/M/d'), 
+                             'value': value});
+  return ft;
+};
+
+// Apply the function to each image in modisLST.
+var TS = modisLST.map(createTS);
+
+// Create a graph of the time-series.
+var graph = ui.Chart.feature.byFeature(TS, 'system:time_start', 'value');
+
+print(graph.setChartType("ColumnChart")
+           .setOptions({vAxis: {title: 'LST [deg. C]'},
+                        hAxis: {title: 'Date'}}));
+
+// Export the time-series as a csv.
+Export.table.toDrive({collection: TS, selectors: 'date, value'});
+//////////////////////////////////////////////////////////////////////////////////EXPORT CLASS FROM LABEL OF LANDCOVER
+
+//////////feature importance
+var startDoy = ee.Date('2022-07-01').getRelative('day', 'year');
+var endDoy = ee.Date('2022-09-30').getRelative('day', 'year')
+
+var data_summer  = data_remove.filter(ee.Filter.calendarRange(startDoy, endDoy, 'day_of_year')).mean()
+var dep_sum = data_summer.select('LST').toInt();
+var indep_sum = data_summer.select('NDVI','evi','lai','B4','ndwi', 'label','B2','B3','B8','B11','B8A','VV','VH','vv/vh','elevation');
+var indep_sum_name = indep_sum.bandNames();
+
+var data_summer2 = dep_sum.addBands(indep_sum);
+
+var training_summer = data_summer2.stratifiedSample({
+  numPoints: 100, classBand: 'LST', region: geometry2, scale: 1000
+  });
+  
+var model_summer = ee.Classifier.smileRandomForest(80).train({
+  features: training_summer, classProperty: 'LST', inputProperties: indep_sum_name
+  }).setOutputMode('REGRESSION');
+ 
+var fit_summer = indep_sum.classify(model_summer).toFloat().rename('LST-10');
+
+//Map.addLayer(fit_summer.clip(geometry), [], 'SUM', false);
+
+//print(model_summer.explain());
+
+var importance = ee.Dictionary(model_summer.explain().get('importance'));
+var importance_sum = importance.values().reduce(ee.Reducer.sum());
+var relative_importance = importance.map(function(key, val){
+  return (ee.Number(val).multiply(100)).divide(importance_sum)
+  });
+
+print(relative_importance,'feature importance')
+//////////////////////////////////////////////////////////////////////////////export datacoll by validation equation
+var data_coll=data_coll.map(function(img){
+ var eq=img.select('sentinel').multiply(slope).add(intercept).rename('validate').clip(geometry2)
+ var validation_landsat=img.select('landsat')
+  return  eq.addBands(validation_landsat).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+})
+ 
+//Map.addLayer(data_coll.select('validate'),{min: 304.2, max: 321.8, palette: ['blue','green','yellow','orange','red']},'validation-sentinel')
+//Map.addLayer(data_coll.select('landsat'),{min: 304.2, max: 321.8, palette: ['blue','green','yellow','orange','red']},'vlandsat')
+
+var Diff = function(img) {
+  // Compute area in sq. km directly from the geometry.
+  var modis10 = img.select('validate')
+  var landsat=img.select('landsat').clip(geometry2)
+  // Compute the difference between computed LST and the LST property.
+  var rmse = ((modis10.subtract(landsat)).pow(2)).rename('rmse');
+  var mae =((modis10.subtract(landsat)).abs()).rename('mae')
+  var mbe=((modis10.subtract(landsat))).rename('mbe')
+  // Return the feature with the squared difference set to the 'diff' property.
+  return rmse.addBands(mae).addBands(mbe).copyProperties(img,['system:time_start','system:time_end']);
+};
+// Calculate RMSE 
+var rmse = data_coll.map(Diff);
+var res = rmse.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  })
+  return image.set('mean', reduced);
+});
+var vals = res.aggregate_array('mean');
+print(vals, 'RMSE-v-total');
+
+///////////////////////////////////////////////////////////////////////////////SAME TIME LAND COVER AND LANDSAT
+var temp_win=5;
+var temp_diff=temp_win*1000*3600*24;
+var join=ee.Join.saveAll({
+  matchesKey:'j',
+  ordering:'system:time_start',
+  measureKey:'temp_diff'
+})
+var before=ee.Filter.greaterThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var after=ee.Filter.lessThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var max_diff=ee.Filter.maxDifference({
+  difference:temp_diff, rightField:'system:time_start', leftField:'system:time_start'
+})
+var before_filter=ee.Filter.and(max_diff,before);
+var after_filter=ee.Filter.and(max_diff,after);
+var filter=ee.Filter.or(before_filter,after_filter)
+var join_data=ee.ImageCollection(join.apply(landsat,landcover_mosaic,filter));
+
+var landcover_COLL=join_data.map(function(img){
+  var mod_max=ee.ImageCollection.fromImages(img.get('j')).select('label').max();
+  var landsat=img.select('landsat').clip(geometry2);
+  return mod_max.divide(10).toInt().clip(geometry2)
+  .copyProperties(img,img.propertyNames())
+});
+
+var rmse_land=rmse.combine(landcover_COLL)
+
+//////////////////////////////////////////////////////////////calculate rmse for each one of land cover
+var analysis=rmse_land.map(function(img){
+  var crop=img.select('label').eq(4);
+   var shrub=img.select('label').eq(5);
+  var built=img.select('label').eq(6);
+     var bare=img.select('label').eq(7);
+     var rmse_crop=img.select('rmse').updateMask(crop).rename('rmse_crop')
+     var rmse_shrub=img.select('rmse').updateMask(shrub).rename('rmse_shrub')
+      var rmse_built=img.select('rmse').updateMask(built).rename('rmse_built')
+       var rmse_bare=img.select('rmse').updateMask(bare).rename('rmse_bare')
+        var mbe_crop=img.select('mbe').updateMask(crop).rename('mbe_crop')
+     var mbe_shrub=img.select('mbe').updateMask(shrub).rename('mbe_shrub')
+      var mbe_built=img.select('mbe').updateMask(built).rename('mbe_built')
+       var mbe_bare=img.select('mbe').updateMask(bare).rename('mbe_bare')
+     return rmse_crop.addBands(rmse_shrub).addBands(rmse_built).addBands(rmse_bare).addBands(mbe_crop).addBands(mbe_shrub).addBands(mbe_built).addBands(mbe_bare)
+})
+var res3 = analysis.map(function(image) {
+  var reduced = image.reduceRegion({geometry: geometry2, 
+                                    reducer: ee.Reducer.mean(), 
+                                    crs: 'EPSG:4326',
+                                     scale: 30
+  });
+  return image.set('mean', reduced);
+});
+var vals3 = res3.aggregate_array('mean');
+print(vals3, 'analysis');
+//////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var vis = {min: 270, max: 380, palette: 'blue,green,yellow,orange,red'};
+var composite = data_coll.first().visualize(vis);
+//Map.addLayer(composite);
+
+
+/*
+ * Legend setup
+ */
+
+// Creates a color bar thumbnail image for use in legend from the given color
+// palette.
+function makeColorBarParams(palette) {
+  return {
+    bbox: [0, 0, 1, 0.1],
+    dimensions: '100x10',
+    format: 'png',
+    min: 0,
+    max: 1,
+    palette: palette,
+  };
+}
+
+// Create the color bar for the legend.
+var colorBar = ui.Thumbnail({
+  image: ee.Image.pixelLonLat().select(0),
+  params: makeColorBarParams(vis.palette),
+  style: {stretch: 'horizontal', margin: '0px 8px', maxHeight: '24px'},
+});
+
+// Create a panel with three numbers for the legend.
+var legendLabels = ui.Panel({
+  widgets: [
+    ui.Label(vis.min, {margin: '4px 8px'}),
+    ui.Label(
+        ((vis.max-vis.min) / 2+vis.min),
+        {margin: '4px 8px', textAlign: 'left', stretch: 'horizontal'}),
+    ui.Label(vis.max, {margin: '4px 8px'})
+  ],
+  layout: ui.Panel.Layout.flow('horizontal')
+});
+
+var legendTitle = ui.Label({
+  value: 'LST (K)',
+  style: {fontWeight: 'bold'}
+});
+
+// Add the legendPanel to the map.
+var legendPanel = ui.Panel([legendTitle, colorBar, legendLabels]);
+Map.add(legendPanel);
+
+////////////////////////////////time series
+
+ var temp_win=5;
+var temp_diff=temp_win*1000*3600*24;
+var join=ee.Join.saveAll({
+  matchesKey:'j',
+  ordering:'system:time_start',
+  measureKey:'temp_diff'
+})
+var before=ee.Filter.greaterThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var after=ee.Filter.lessThan({
+  rightField:'system:time_start', leftField:'system:time_start'
+})
+var max_diff=ee.Filter.maxDifference({
+  difference:temp_diff, rightField:'system:time_start', leftField:'system:time_start'
+})
+var before_filter=ee.Filter.and(max_diff,before);
+var after_filter=ee.Filter.and(max_diff,after);
+var filter=ee.Filter.or(before_filter,after_filter)
+var join_data=ee.ImageCollection(join.apply(temp,data_coll,filter));
+
+var madis_modis_d=join_data.map(function(img){
+  var cons=ee.Image(1)
+  var mod_max=ee.ImageCollection.fromImages(img.get('j')).select('validate').max();
+  var modis=img.select('LST').clip(geometry2);
+  return mod_max.addBands(cons).addBands(modis).toInt().clip(geometry2)
+.select([0,1,2],['sentinel','cons','modis']).copyProperties(img, img.propertyNames()).copyProperties(img,['system:time_start','system:time_end'])
+  })
+var model=madis_modis_d.reduce(ee.Reducer.robustLinearRegression(2,1)).select('coefficients');
+var slope3=model.arrayGet([0,0]);
+var intercept3=model.arrayGet([1,0]);
+
+var MODIS_DAILY = imageCollection2
+.filterDate(time_start, time_end).filterBounds(geometry2).map(function(img){
+ var band=img.select('LST_Day_1km').multiply(0.02).multiply(slope3).add(intercept3).reproject('EPSG:4326', null, 30);
+  return  band.rename('Downscaled_LST')
+  .copyProperties(img,['system:time_start','system:time_end'] )
+  });
+  print(MODIS_DAILY)
+var MODIS = temp.filterBounds(geometry2).filter(ee.Filter.calendarRange(1, 12, 'month'))
+var MODIS_D = MODIS_DAILY.filterBounds(geometry2).filter(ee.Filter.calendarRange(1, 12, 'month'))
+
+
+// merge the collections
+var merged = MODIS.merge(MODIS_D)
+// plot the collection
+var title = {
+  title: 'LST Timeseries',
+  hAxis: {title: 'Date'},
+  vAxis: {title: 'LST-K'},
+  };
+var chart = ui.Chart.image.series({
+  imageCollection: merged,
+  region: geometry2,
+  reducer: ee.Reducer.mean(),
+  scale: 30
+})
+
+print(chart)
+////////////////////////////////
+// Applying first reducer
+var compare= MODIS_DAILY.filter(ee.Filter.eq('system:index', '2022_07_19'));
+print(compare)
+var results = compare.first().reduceRegions({
+  collection: table, 
+  reducer: ee.Reducer.mean(), 
+  scale: 250, // Native resolution
+});
+
+// Print in console (the NDVI value will be named “first”).  
+print(results);
+//Map.addLayer(results)
+// merge the collections
+Export.table.toDrive({
+  collection: results,
+  description: 'image_',
+  folder: 'earth_engine_demos',
+  fileFormat: 'CSV'
+});
